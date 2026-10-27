@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 
 type SpeechRecognitionResult = {
   transcript: string;
@@ -27,57 +27,74 @@ type SpeechWindow = Window & {
   webkitSpeechRecognition?: new () => BrowserSpeechRecognition;
 };
 
-const orders = [
-  {
-    id: "ORD-101",
-    customer: "Priya Sharma",
-    product: "Vitamin C Serum 30ml",
-    amount: "₹699",
-    status: "Out for Delivery",
-    courier: "BlueDart BD-982103",
-    delivery: "Expected by 6 PM today",
-  },
-  {
-    id: "ORD-102",
-    customer: "Rahul Verma",
-    product: "Hydrating Sunscreen SPF 50",
-    amount: "₹499",
-    status: "Delivered",
-    courier: "Delhivery DL-441029",
-    delivery: "Delivered 14 days ago",
-  },
-  {
-    id: "ORD-103",
-    customer: "Ananya Patel",
-    product: "Green Tea Face Wash + Toner",
-    amount: "₹850",
-    status: "Processing",
-    courier: "Not shipped yet",
-    delivery: "Ordered 3 hours ago",
-  },
-];
 
-function get_order_details(order_id: string) {
+type Order = {
+  id: string;
+  customer: string;
+  product: string;
+  amount: string;
+  status: string;
+  courier: string;
+  delivery: string;
+};
+
+type ApiOrder = {
+  orderId: string;
+  customerName: string;
+  product: string;
+  price: number;
+  status: string;
+  courier: string | null;
+  trackingNumber: string | null;
+  expectedDelivery: string;
+};
+
+function mapApiOrder(item: ApiOrder): Order {
+  return {
+    id: item.orderId,
+    customer: item.customerName,
+    product: item.product,
+    amount: `₹${item.price}`,
+    status: item.status,
+    courier: item.trackingNumber
+      ? `${item.courier ?? ""} ${item.trackingNumber}`.trim()
+      : item.expectedDelivery,
+    delivery: item.expectedDelivery,
+  };
+}
+
+async function get_order_details(order_id: string) {
   const normalizedOrderId = order_id
     .trim()
     .toUpperCase()
     .replace(/\s+/g, "-");
 
-  const order = orders.find(
-    (item) => item.id === normalizedOrderId
-  );
+  try {
+    const response = await fetch(
+      `/api/orders?orderId=${encodeURIComponent(normalizedOrderId)}`
+    );
 
-  if (!order) {
+    const data = await response.json();
+
+    if (!response.ok || !data.success || !data.order) {
+      return {
+        found: false as const,
+        message: `Order ${normalizedOrderId} was not found.`,
+      };
+    }
+
     return {
-      found: false,
-      message: `Order ${normalizedOrderId} was not found.`,
+      found: true as const,
+      order: mapApiOrder(data.order as ApiOrder),
+    };
+  } catch (error) {
+    console.error("Order lookup failed:", error);
+
+    return {
+      found: false as const,
+      message: "Unable to retrieve order details. Please try again.",
     };
   }
-
-  return {
-    found: true,
-    order,
-  };
 }
 
 
@@ -88,6 +105,8 @@ const [heardText, setHeardText] = useState("");
 
 const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const [orderId, setOrderId] = useState("ORD-101");
+  const [orders, setOrders] = useState<Order[]>([]);
+const [ordersLoading, setOrdersLoading] = useState(true);
   const [transcript, setTranscript] = useState<string[]>([]);
   const [summary, setSummary] = useState<{
     customer_intent: string;
@@ -107,7 +126,77 @@ const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   }[]
 >([]);
 
-  const order = orders.find((item) => item.id === orderId);
+useEffect(() => {
+  async function loadOrders() {
+    try {
+      const response = await fetch("/api/orders");
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error("Failed to load orders");
+      }
+
+      setOrders((data.orders as ApiOrder[]).map(mapApiOrder));
+    } catch (error) {
+      console.error("Failed to load orders:", error);
+    } finally {
+      setOrdersLoading(false);
+    }
+  }
+
+  loadOrders();
+  }, []);
+  useEffect(() => {
+  async function loadCallHistory() {
+    try {
+      const response = await fetch("/api/call-history");
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error("Failed to load call history");
+      }
+
+      setCallHistory(data.calls);
+    } catch (error) {
+      console.error("Failed to load call history:", error);
+    }
+  }
+
+  loadCallHistory();
+}, []);
+const order = orders.find((item) => item.id === orderId);
+async function askAboutOrder() {
+  const result = await get_order_details(orderId);
+
+  if (!result.found) {
+    setTranscript((previous) => [
+      ...previous,
+      `You: Please check order ${orderId}.`,
+      `Aria: ${result.message}`,
+    ]);
+    return;
+  }
+
+  const item = result.order;
+
+  const reply = `Your order ${item.id} for ${item.product} is currently ${item.status}. ${item.courier}. ${item.delivery}.`;
+
+  setTranscript((previous) => [
+    ...previous,
+    `You: Can you check order ${item.id}?`,
+    `Aria: ${reply}`,
+  ]);
+
+  setSummary({
+    customer_intent: "Order status inquiry",
+    order_id: item.id,
+    resolution_status: "Order details retrieved",
+    call_summary: `${item.product} — ${item.status}. ${item.delivery}.`,
+  });
+
+  speak(reply);
+}
+  
   function speak(text: string) {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) {
     setVoiceStatus("Speech output unavailable");
@@ -146,7 +235,7 @@ function startListening() {
   recognition.continuous = false;
   recognition.interimResults = false;
 
-  recognition.onresult = (event) => {
+  recognition.onresult = async (event) => {
     const text = event.results[0][0].transcript.trim();
     setHeardText(text);
     setTranscript((previous) => [...previous, `You: ${text}`]);
@@ -156,123 +245,47 @@ const spoken = text.toLowerCase();
 let reply =
   "I'm sorry, I can help with order status, delivery, cancellation, returns, damaged products, and cash on delivery. Could you tell me a little more?";
 
-
 const orderMatch = spoken.match(/\b(?:ord[-\s]*|order\s*)(\d+)\b/i);
-
-if (orderMatch && !["101", "102", "103"].includes(orderMatch[1])) {
-  const result = get_order_details(`ORD-${orderMatch[1]}`);
-
-  reply = result.found
-    ? `I found your order ${orderMatch[1]}, but I need to check its latest details.`
-    : `I'm sorry, I couldn't find order ${orderMatch[1]} in our system. Could you please check your order number and try again?`;
-
-} else if (
-  spoken.includes("ord 101") ||
-  spoken.includes("order 101")
-) {
-  const result = get_order_details("ORD-101");
+if (orderMatch) {
+  const result = await get_order_details(`ORD-${orderMatch[1]}`);
 
   if (result.found) {
-    reply = result.order
-      ? `Your order ORD 101 for ${result.order.product} is ${result.order.status.toLowerCase()}. It is being delivered by ${result.order.courier}. ${result.order.delivery}.`
-      : "I couldn't retrieve the details for order 101.";
+    const item = result.order;
+    reply = `Your order ${item.id} for ${item.product} is currently ${item.status}. ${item.courier}. ${item.delivery}.`;
   } else {
-    reply = "I'm sorry, I couldn't find order 101 in our system.";
+    reply = result.message;
   }
+} else if (
+  spoken.includes("shipping") ||
+  spoken.includes("delivery charge") ||
+  spoken.includes("delivery fee")
+) {
+  reply =
+    "Delivery is free for orders above 499 rupees. Orders below 499 rupees have a 50 rupee delivery fee. Delivery usually takes 3 to 5 business days.";
+} else if (spoken.includes("cancel")) {
+  reply =
+    "An order can be cancelled while it is processing. Once shipped or out for delivery, it cannot be cancelled, but you may refuse delivery at the doorstep.";
+} else if (
+  spoken.includes("return") ||
+  spoken.includes("refund")
+) {
+  reply =
+    "Returns are accepted within 7 days of delivery for unopened and unused products in their original packaging.";
+} else if (
+  spoken.includes("damaged") ||
+  spoken.includes("defective") ||
+  spoken.includes("broken")
+) {
+  reply =
+    "Please report a damaged or defective product within 48 hours and provide photos so the replacement request can be reviewed.";
+} else if (
+  spoken.includes("cash on delivery") ||
+  spoken.includes("cod")
+) {
+  reply =
+    "Cash on delivery is available for orders up to 2,500 rupees. You can pay by cash or UPI at your doorstep.";
 }
 
- else if (
-  spoken.includes("ord 102") ||
-  spoken.includes("order 102")
-) {
-  const result = get_order_details("ORD-102");
-
-  if (result.found) {
-    reply =
-      "Order O R D 102 was delivered 14 days ago. Our standard return window is 7 days after delivery, so it is outside the return window.";
-  } else {
-    reply = "I'm sorry, I couldn't find order 102 in our system.";
-  }
-} else if (
-  spoken.includes("ord 103") ||
-  spoken.includes("order 103")
-) {
-  const result = get_order_details("ORD-103");
-
-  if (result.found) {
-    reply =
-      "Order O R D 103 is still processing. It can be cancelled while it remains in processing.";
-  } else {
-    reply = "I'm sorry, I couldn't find order 103 in our system.";
-  }
-}
-
-   
-if (orderMatch && !["101", "102", "103"].includes(orderMatch[1])) {
-  const result = get_order_details(`ORD-${orderMatch[1]}`);
-
-  reply = result.found
-    ? `I found your order ${orderMatch[1]}, but I need to check its latest details.`
-    : `I'm sorry, I couldn't find order ${orderMatch[1]} in our system. Could you please check your order number and try again?`;
-
-} else if (
-  spoken.includes("ord 101") ||
-  spoken.includes("order 101")
-) {
-  const result = get_order_details("ORD-101");
-
-  if (result.found) {
-    reply =
-      "Order O R D 101 is out for delivery with BlueDart. It is expected by 6 PM today.";
-  } else {
-    reply = "I'm sorry, I couldn't find order 101 in our system.";
-  }
-
-} else if (
-  spoken.includes("ord 102") ||
-  spoken.includes("order 102")
-) {
-  const result = get_order_details("ORD-102");
-
-  if (result.found) {
-    reply =
-      "Order O R D 102 was delivered 14 days ago. Our standard return window is 7 days after delivery, so it is outside the return window.";
-  } else {
-    reply = "I'm sorry, I couldn't find order 102 in our system.";
-  }
-
-} else if (
-  spoken.includes("ord 103") ||
-  spoken.includes("order 103")
-) {
-  const result = get_order_details("ORD-103");
-
-  if (result.found) {
-    reply =
-      "Order O R D 103 is still processing. It can be cancelled while it remains in processing.";
-  } else {
-    reply = "I'm sorry, I couldn't find order 103 in our system.";
-  }
-}
- else if (spoken.includes("shipping") || spoken.includes("delivery charge")) {
-      reply =
-        "Delivery is free for orders above 499 rupees. Orders below 499 rupees have a 50 rupee delivery fee. Delivery usually takes 3 to 5 business days.";
-    } else if (spoken.includes("cancel")) {
-      reply =
-        "An order can be cancelled while it is processing. Once shipped or out for delivery, it cannot be cancelled, but you may refuse delivery at the doorstep.";
-    } else if (spoken.includes("return")) {
-      reply =
-        "Returns are accepted within 7 days of delivery for unopened and unused products in their original packaging.";
-    } else if (
-      spoken.includes("damaged") ||
-      spoken.includes("defective")
-    ) {
-      reply =
-        "Please report a damaged or defective product within 48 hours and provide photos so the replacement request can be reviewed.";
-    } else if (spoken.includes("cash on delivery") || spoken.includes("cod")) {
-      reply =
-        "Cash on delivery is available for orders up to 2,500 rupees. You can pay by cash or UPI at your doorstep.";
-    }
 
     setTranscript((previous) => [...previous, `Aria: ${reply}`]);
     speak(reply);
@@ -318,7 +331,7 @@ function startCall() {
   );
 }
    
-function endCall() {
+async function endCall() {
   // Stop voice recognition
   recognitionRef.current?.stop();
   recognitionRef.current = null;
@@ -391,39 +404,37 @@ if (/return|refund/i.test(customerConversation)) {
   setSummary(newSummary);
 
   // Save this completed call in call history
-  setCallHistory((previous) => [
-    ...previous,
-    {
-      call_id: `CALL-${Date.now()}`,
-      ...newSummary,
-      transcript: finalTranscript,
-      ended_at: new Date().toISOString(),
+  
+const newCall = {
+  call_id: `CALL-${Date.now()}`,
+  ...newSummary,
+  transcript: finalTranscript,
+  ended_at: new Date().toISOString(),
+};
+
+setCallHistory((previous) => [...previous, newCall]);
+
+try {
+  const response = await fetch("/api/call-history", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
     },
-  ]);
-}
- function askAboutOrder() {
-    if (!order) {
-      setTranscript((previous) => [
-        ...previous,
-        `You: Please check order ${orderId}.`,
-        "Aria: I couldn't find that order. Please check the order ID and try again.",
-      ]);
-      return;
-    }
+    body: JSON.stringify(newCall),
+  });
 
-    setTranscript((previous) => [
-      ...previous,
-      `You: Can you check order ${order.id}?`,
-      `Aria: ${order.customer}'s order for ${order.product} is currently ${order.status}. ${order.delivery}.`,
-    ]);
+  const data = await response.json();
 
-    setSummary({
-      customer_intent: "Order status inquiry",
-      order_id: order.id,
-      resolution_status: "Order details retrieved",
-      call_summary: `${order.product} — ${order.status}. ${order.delivery}.`,
-    });
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || "Failed to save call history");
   }
+
+  console.log("Call history saved to MongoDB successfully.");
+} catch (error) {
+  console.error("Could not save call history to MongoDB:", error);
+}
+
+}
 
   return (
     <main className="min-h-screen bg-[#f7f5f0] p-4 text-[#252820] sm:p-8">
@@ -521,18 +532,27 @@ if (/return|refund/i.test(customerConversation)) {
                 Select a sample order from the assessment.
               </p>
               <div className="mt-4 flex flex-wrap gap-3">
-                <select
-                  value={orderId}
-                  onChange={(event) => setOrderId(event.target.value)}
-                  className="min-w-0 flex-1 rounded-xl border border-gray-300 bg-white p-3"
-                  aria-label="Select order"
-                >
-                  {orders.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.id} — {item.customer}
-                    </option>
-                  ))}
-                </select>
+               
+<select
+  value={orderId}
+  onChange={(event) => setOrderId(event.target.value)}
+  disabled={ordersLoading}
+  className="min-w-0 flex-1 rounded-xl border border-gray-300 bg-white p-3"
+  aria-label="Select order"
+>
+  {ordersLoading ? (
+    <option value="">Loading orders...</option>
+  ) : orders.length === 0 ? (
+    <option value="">No orders available</option>
+  ) : (
+    orders.map((item) => (
+      <option key={item.id} value={item.id}>
+        {item.id} — {item.customer}
+      </option>
+    ))
+  )}
+</select>
+
                 <button
                   onClick={askAboutOrder}
                   className="rounded-xl bg-[#e8eddf] px-4 py-3 font-medium text-[#344a35] hover:bg-[#dce5d1]"
