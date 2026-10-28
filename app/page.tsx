@@ -485,7 +485,7 @@ try {
               </h3>
               <p className="mt-2 text-sm leading-6 text-gray-600">
                 {callActive
-                  ? "This is the initial dashboard demo. Live microphone and AI responses are not connected yet."
+                  ? "This is the initial dashboard demo. Live microphone and AI responses are  connected ."
                   : "Start a demo call or test an order lookup to explore the dashboard."}
               </p>
             </div>
